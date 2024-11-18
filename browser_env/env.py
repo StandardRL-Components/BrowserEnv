@@ -187,7 +187,7 @@ class BrowserEnvironment:
             },
             "volumes": [
                 f"{os.path.abspath(self.config_dir)}:/config",
-                f"{os.path.abspath(extensions_path)}:/config/firefox/extensions:ro",
+                f"{os.path.abspath(extensions_path)}:/usr/lib/firefox/distribution/extensions:ro",
                 f"{os.path.abspath(config_template_path / '/profile/settings')}:/config/profile/settings:ro",
                 #f"{os.path.abspath(config_template_path / '/profile/prefs.js')}:/config/profile/prefs.js:ro",
             ],
