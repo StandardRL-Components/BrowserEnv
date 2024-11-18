@@ -20,7 +20,7 @@ import filecmp
 import pkg_resources
 
 class WebSocketServer:
-    def __init__(self, host="172.44.0.1", port=39220):
+    def __init__(self, host="172.20.0.1", port=39220):
         self.host = host
         self.port = port
         self.server = None
@@ -105,7 +105,7 @@ class BrowserEnvironment:
 
     # Create Docker network and IP pool on the first instantiation
     @classmethod
-    def _initialize_network(cls, ip_range="172.44.0.0/24"):
+    def _initialize_network(cls, ip_range="172.20.0.0/24"):
         """Initialize Docker network and populate available IP list."""
         try:
             cls._docker_client.networks.get(cls._network_name)
@@ -198,7 +198,7 @@ class BrowserEnvironment:
         })
 
         self.compose_data['services']['browser_service']['environment'].update({
-            "FF_OPEN_URL": "https://assets.standardrl.com/redirects/browser-start/",
+            "FF_OPEN_URL": "https://assets.standardrl.com/redirects/browser/?subnet=20",
             "VNC_PASSWORD": "12345",
             "USER_ID": self.uid,
             "GROUP_ID": self.gid
