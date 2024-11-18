@@ -201,7 +201,8 @@ class BrowserEnvironment:
             "FF_OPEN_URL": "https://assets.standardrl.com/redirects/browser/?subnet=20",
             "VNC_PASSWORD": "12345",
             "USER_ID": self.uid,
-            "GROUP_ID": self.gid
+            "GROUP_ID": self.gid,
+            "KEEP_APP_RUNNING": "1"
         })
 
         print(self.compose_data)
