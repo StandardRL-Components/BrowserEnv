@@ -1,0 +1,15 @@
+version: '3'
+services:
+  browser_service:
+    image: jlesage/firefox
+    security_opt:
+      - seccomp:unconfined
+    environment:
+        DISPLAY_WIDTH: 500
+        DISPLAY_HEIGHT: 583
+        VNC_ENCODING: hextile
+        VNC_LISTENING_PORT: 5901
+    restart: unless-stopped
+networks:
+  browser_environment_network:
+    external: true  # Indicates that this network is managed outside of Docker Compose
