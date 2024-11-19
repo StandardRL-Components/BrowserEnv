@@ -28,7 +28,7 @@ class WebSocketServer:
         self.clients = set()
         self.thread = None
 
-    async def handler(self, websocket, path=None):
+    async def handler(self, websocket, path):
         # Register the client
         self.clients.add(websocket)
         client_ip = websocket.remote_address[0]
@@ -64,24 +64,28 @@ class WebSocketServer:
         finally:
             await websocket.close()
 
+    def _start_server(self):
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_until_complete(self.start_server())
+        self.loop.run_forever()
+
     async def start_server(self):
-        # Correctly bind the handler with self
-        self.server = await websockets.serve(lambda ws, path: self.handler(ws, path), self.host, self.port)
+        # Start the WebSocket server using websockets.serve
+        self.server = await websockets.serve(self.handler, self.host, self.port)
         print(f"WebSocket server running on ws://{self.host}:{self.port}")
         await self.server.wait_closed()
 
-    def _run_server(self):
-        asyncio.run(self.start_server())
-
     def start(self):
         # Start the server in a separate thread
-        self.thread = Thread(target=self._run_server, daemon=True)
+        self.thread = Thread(target=self._start_server, daemon=True)
         self.thread.start()
 
     def stop(self):
         if self.server:
-            # Run the stop coroutine in the event loop
-            asyncio.run_coroutine_threadsafe(self.stop_server(), asyncio.get_event_loop())
+            # Schedule the stop coroutine in the event loop
+            asyncio.run_coroutine_threadsafe(self.stop_server(), self.loop)
+            self.loop.call_soon_threadsafe(self.loop.stop)
             self.thread.join()
 
 
