@@ -28,7 +28,7 @@ class WebSocketServer:
         self.clients = set()
         self.thread = None
 
-    async def handler(self, websocket, path):
+    async def handler(self, websocket):
         # Register the client
         self.clients.add(websocket)
         client_ip = websocket.remote_address[0]
