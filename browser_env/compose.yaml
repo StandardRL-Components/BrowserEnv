@@ -1,7 +1,7 @@
 version: '3'
 services:
   browser_service:
-    image: jlesage/firefox
+    image: firefoxdeveloperdocker:v0.1 #jlesage/firefox
     security_opt:
       - seccomp:unconfined
     environment:

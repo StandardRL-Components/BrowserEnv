@@ -176,7 +176,9 @@ class BrowserEnvironment:
             self.compose_data = yaml.safe_load(file)
 
         os.mkdir(os.path.join(self.config_dir, "profile"))
-        shutil.copyfile(os.path.join(config_template_path, 'profile', 'prefs.js'), os.path.join(self.config_dir, 'profile', 'prefs.js'))
+        for f in os.listdir(os.path.join(config_template_path, 'profile')):
+            if not os.path.isdir(os.path.join(config_template_path, 'profile', f)):
+                shutil.copyfile(os.path.join(config_template_path, 'profile', f), os.path.join(self.config_dir, 'profile', f))
 
         # Apply environment-specific configurations to the compose file data
         self.compose_data['services']['browser_service'].update({
@@ -187,7 +189,7 @@ class BrowserEnvironment:
             },
             "volumes": [
                 f"{os.path.abspath(self.config_dir)}:/config",
-                f"{os.path.abspath(extensions_path)}:/usr/lib/firefox/distribution/extensions:ro",
+                f"{os.path.abspath(extensions_path)}:/config/profile/extensions:ro",
                 f"{os.path.abspath(config_template_path / '/profile/settings')}:/config/profile/settings:ro",
                 #f"{os.path.abspath(config_template_path / '/profile/prefs.js')}:/config/profile/prefs.js:ro",
             ],
