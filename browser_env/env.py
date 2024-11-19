@@ -69,12 +69,13 @@ class WebSocketServer:
         asyncio.run(self.start_server())
 
     async def start_server(self):
-        # Use functools.partial to bind self to the handler method
-        bound_handler = partial(self.handler)
         # Start the WebSocket server using websockets.serve
-        self.server = await websockets.serve(bound_handler, self.host, self.port)
+        self.server = await websockets.serve(self.handler, self.host, self.port)
         print(f"WebSocket server running on ws://{self.host}:{self.port}")
         await self.server.wait_closed()
+
+    def _run_server(self):
+        asyncio.run(self.start_server())
 
     def start(self):
         # Start the server in a separate thread
@@ -82,8 +83,8 @@ class WebSocketServer:
         self.thread.start()
 
     def stop(self):
-        # If the server is running, stop it
         if self.server:
+            # Run the stop coroutine in the event loop
             asyncio.run_coroutine_threadsafe(self.stop_server(), asyncio.get_event_loop())
             self.thread.join()
 
