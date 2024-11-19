@@ -18,6 +18,7 @@ import numpy as np
 from pathlib import Path
 import filecmp
 import pkg_resources
+from functools import partial
 
 class WebSocketServer:
     def __init__(self, host="127.0.0.1", port=39220):
@@ -68,21 +69,22 @@ class WebSocketServer:
         asyncio.run(self.start_server())
 
     async def start_server(self):
+        # Use functools.partial to bind self to the handler method
+        bound_handler = partial(self.handler)
         # Start the WebSocket server using websockets.serve
-        self.server = await websockets.serve(self.handler, self.host, self.port)
+        self.server = await websockets.serve(bound_handler, self.host, self.port)
         print(f"WebSocket server running on ws://{self.host}:{self.port}")
         await self.server.wait_closed()
 
     def start(self):
         # Start the server in a separate thread
-        print("Starting ws server...")
         self.thread = Thread(target=self._run_server, daemon=True)
         self.thread.start()
 
     def stop(self):
         # If the server is running, stop it
         if self.server:
-            asyncio.run_coroutine_threadsafe(self.stop_server(), self.server.loop)
+            asyncio.run_coroutine_threadsafe(self.stop_server(), asyncio.get_event_loop())
             self.thread.join()
 
 
