@@ -47,42 +47,42 @@ class WebSocketServer:
             # Unregister the client
             self.clients.remove(websocket)
 
-        async def stop_server(self):
-            print("Stopping WebSocket server...")
-            if self.clients:
-                # Notify and disconnect all clients
-                await asyncio.gather(*(self.disconnect_client(client) for client in self.clients))
-            self.server.close()
-            await self.server.wait_closed()
-            print("WebSocket server stopped.")
+    async def stop_server(self):
+        print("Stopping WebSocket server...")
+        if self.clients:
+            # Notify and disconnect all clients
+            await asyncio.gather(*(self.disconnect_client(client) for client in self.clients))
+        self.server.close()
+        await self.server.wait_closed()
+        print("WebSocket server stopped.")
 
-        async def disconnect_client(self, websocket):
-            try:
-                await websocket.send("END")
-            except Exception as e:
-                print(f"Error sending 'END' to client: {e}")
-            finally:
-                await websocket.close()
+    async def disconnect_client(self, websocket):
+        try:
+            await websocket.send("END")
+        except Exception as e:
+            print(f"Error sending 'END' to client: {e}")
+        finally:
+            await websocket.close()
 
-        async def start_server(self):
-            # Correctly bind the handler with self
-            self.server = await websockets.serve(lambda ws, path: self.handler(ws, path), self.host, self.port)
-            print(f"WebSocket server running on ws://{self.host}:{self.port}")
-            await self.server.wait_closed()
+    async def start_server(self):
+        # Correctly bind the handler with self
+        self.server = await websockets.serve(lambda ws, path: self.handler(ws, path), self.host, self.port)
+        print(f"WebSocket server running on ws://{self.host}:{self.port}")
+        await self.server.wait_closed()
 
-        def _run_server(self):
-            asyncio.run(self.start_server())
+    def _run_server(self):
+        asyncio.run(self.start_server())
 
-        def start(self):
-            # Start the server in a separate thread
-            self.thread = Thread(target=self._run_server, daemon=True)
-            self.thread.start()
+    def start(self):
+        # Start the server in a separate thread
+        self.thread = Thread(target=self._run_server, daemon=True)
+        self.thread.start()
 
-        def stop(self):
-            if self.server:
-                # Run the stop coroutine in the event loop
-                asyncio.run_coroutine_threadsafe(self.stop_server(), asyncio.get_event_loop())
-                self.thread.join()
+    def stop(self):
+        if self.server:
+            # Run the stop coroutine in the event loop
+            asyncio.run_coroutine_threadsafe(self.stop_server(), asyncio.get_event_loop())
+            self.thread.join()
 
 
 class BrowserEnvironmentException(Exception):
