@@ -70,7 +70,7 @@ browser.webNavigation.onCommitted.addListener((details) => {
         if (/^\d+$/.test(subnet)) {
           // Valid subnet, proceed with connection
           // Construct the WebSocket URL using 'subnet' and 'baseDomain'
-          const websocketUrl = `wss://${subnet}.${baseDomain}`;
+          const websocketUrl = `wss://${subnet}.${baseDomain}/s`;
           console.log("Target URL detected. Connecting WebSocket to:", websocketUrl);
 
           // Connect to the WebSocket server

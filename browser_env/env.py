@@ -75,6 +75,7 @@ class WebSocketServer:
 
     def start(self):
         # Start the server in a separate thread
+        print("Starting ws server...")
         self.thread = Thread(target=self._run_server, daemon=True)
         self.thread.start()
 
