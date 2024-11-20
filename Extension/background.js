@@ -51,7 +51,7 @@ browser.runtime.onMessage.addListener((message, sender) => {
 });
 
 // Listen for page navigation events
-browser.webNavigation.onCommitted.addListener((details) => {{
+browser.webNavigation.onCommitted.addListener((details) => {
   const { url, frameId } = details;
 
   // Only handle top-level navigations
