@@ -51,8 +51,11 @@ browser.runtime.onMessage.addListener((message, sender) => {
 });
 
 // Listen for page navigation events
-browser.webNavigation.onCommitted.addListener((details) => {
-  const { url } = details;
+browser.webNavigation.onCommitted.addListener((details) => {{
+  const { url, frameId } = details;
+
+  // Only handle top-level navigations
+  if (frameId !== 0) return;
 
   if (ws && ws.readyState === WebSocket.OPEN) {
     const navigationMessage = {
