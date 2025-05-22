@@ -3,7 +3,7 @@
     "name": "StandardRL Browser Env Extension",
     "version": "1.1",
     "description": "Provides support for BrowserEnv.",
-    "permissions": ["tabs", "webNavigation", "scripting"],
+    "permissions": ["tabs", "webNavigation", "scripting", "storage"],
     "background": {
       "scripts": ["background.js"]
     },
