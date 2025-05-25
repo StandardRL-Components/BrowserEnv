@@ -396,20 +396,420 @@ class BrowserEnvironment:
             except:
                 pass
 
-    def __init__(self, height, width, subnet=20, send_pipe=None,
-                 recv_pipe=None, child_mode=False, static_ip=None):
-        """
-        Launch a Firefox container with VNC, configure IPC, and assign an IP.
+    def __init__(self, height, width, subnet=20, send_pipe=None, recv_pipe=None, child_mode=False, static_ip=None):
+        """Initialize the environment, start Docker container, and assign an IP."""
 
-        If no IPC pipes provided, spawn a WebSocketServer. Otherwise use NamedPipeServer.
-        """
-        # ... initialization logic unchanged ...
-        pass  # placeholder for brevity
+        config_template_path = Path(pkg_resources.resource_filename('browser_env', 'config-template'))
+        extensions_path = Path(pkg_resources.resource_filename('browser_env', 'extensions'))
+        compose_file = Path(pkg_resources.resource_filename('browser_env', 'compose.yaml'))
+        
+        self.subnet = subnet
 
-    # Remaining methods: navigate, _connect_vnc, _set_screen, receive,
-    # clearEvents, await..., getBlankScreen, getScreen, nudgeMouse, setMouse,
-    # click, mouseHoldStart, mouseHoldEnd, keyDown, keyUp, keyPress,
-    # close, __del__
+        # Perform one-time cleanup of existing containers
+        if not BrowserEnvironment._initialized:
+            BrowserEnvironment._subnet = self.subnet
+            BrowserEnvironment._network_name = f"browser_environment_network_{self.subnet}"
+            if not child_mode:
+                BrowserEnvironment._cleanup_existing_containers()
+                BrowserEnvironment._initialize_network(ip_range=f"172.{self.subnet}.0.0/24")
+            if send_pipe is None or recv_pipe is None:
+                BrowserEnvironment._ws_server = WebSocketServer(port=39200+self.subnet)
+                BrowserEnvironment._ws_server.start()
+            else:
+                BrowserEnvironment._nm_server = NamedPipeServer()
+                BrowserEnvironment._nm_server.startServer(recv_pipe, send_pipe, self)
+            BrowserEnvironment._initialized = True
+
+        if static_ip is None:
+            # Acquire lock to safely assign IP
+            with BrowserEnvironment._lock:
+                if not BrowserEnvironment._available_ips:
+                    raise BrowserEnvironmentException("Maximum number of environments created")
+                self.ip_address = BrowserEnvironment._available_ips.pop(0)
+        else:
+            self.ip_address = static_ip
+
+        # Store the instance in the class-level dictionary
+        BrowserEnvironment._instances[self.ip_address] = self
+
+        self.uid = os.getuid()  # Current user's UID
+        self.gid = os.getgid()  # Current user's GID
+
+        self.websockets = set()
+
+        self.TOOLBAR_MARGIN = 87
+
+        self.last_seen = time.time()
+        self.last_msg = None
+
+        self.width = width
+        self.height = height
+
+        self.isMouseDown = False
+
+        self.current_url = ""
+
+        self.last_element = None
+        self.last_highlight = None
+        self.last_scroll = None
+
+        self.vnc_client = None
+
+        self._mouseUpCondition = Condition()
+        self._mouseDownCondition = Condition()
+        self._navigateCondition = Condition()
+        self._mouseMoveCondition = Condition()
+        self._connectionCondition = Condition()
+        
+        # Create a unique directory for this container's config based on IP
+        self.config_dir = tempfile.mkdtemp()
+
+        # Generate a unique project name to isolate this instance
+        self.project_name = f"browser_env_{uuid.uuid4().hex[:8]}"
+
+        # Modify the compose file to set the correct volumes, IP address, and exposed ports
+        with open(compose_file, "r") as file:
+            self.compose_data = yaml.safe_load(file)
+
+        os.mkdir(os.path.join(self.config_dir, "profile"))
+        for f in os.listdir(os.path.join(config_template_path, 'profile')):
+            if not os.path.isdir(os.path.join(config_template_path, 'profile', f)):
+                shutil.copyfile(os.path.join(config_template_path, 'profile', f), os.path.join(self.config_dir, 'profile', f))
+
+        # Apply environment-specific configurations to the compose file data
+        self.compose_data['services']['browser_service'].update({
+            "networks": {
+                BrowserEnvironment._network_name: {
+                    "ipv4_address": self.ip_address
+                }
+            },
+            "volumes": [
+                f"{os.path.abspath(self.config_dir)}:/config",
+                f"{os.path.abspath(extensions_path)}:/config/profile/extensions:ro",
+                f"{os.path.abspath(config_template_path / '/profile/settings')}:/config/profile/settings:ro",
+                #f"{os.path.abspath(config_template_path / '/profile/prefs.js')}:/config/profile/prefs.js:ro",
+            ],
+            "expose": ["5901"],  # Expose port 5901 for VNC
+            "labels": {  # Add label to identify containers created by this script
+                "created_by": f"BrowserEnvironment{self.subnet}"
+            }
+        })
+
+        self.compose_data['services']['browser_service']['environment'].update({
+            "FF_OPEN_URL": f"https://assets.standardrl.com/redirects/ff/?subnet={self.subnet}",
+            "VNC_PASSWORD": "12345",
+            "USER_ID": self.uid,
+            "GROUP_ID": self.gid,
+            "KEEP_APP_RUNNING": "1",
+            "DISPLAY_WIDTH": self.width,
+            "DISPLAY_HEIGHT": self.TOOLBAR_MARGIN+self.height
+        })
+
+        self.compose_data['networks'] = {}
+        self.compose_data['networks'][BrowserEnvironment._network_name] = {
+            'external': True
+        }
+
+        print(self.compose_data)
+        
+        
+        # Write modified compose data to a temporary file for this instance
+        self.modified_compose_file = tempfile.NamedTemporaryFile(delete=False, suffix=".yaml")
+        with open(self.modified_compose_file.name, 'w') as file:
+            yaml.dump(self.compose_data, file)
+
+        self.modified_compose_file.close()
+        # Start the container with the modified compose file and unique project name
+        try:
+            subprocess.run(
+                ["docker-compose", "-f", self.modified_compose_file.name, "up", "-d"],
+                check=True,
+                env=dict(os.environ, COMPOSE_PROJECT_NAME=self.project_name)
+            )
+        except subprocess.CalledProcessError as e:
+            # Return IP to pool and clean up temp dir if container fails to start
+            with BrowserEnvironment._lock:
+                BrowserEnvironment._available_ips.append(self.ip_address)
+                
+            # Remove the instance from the class-level dictionary
+            BrowserEnvironment._instances.pop(self.ip_address, None)
+
+            if self.config_dir and os.path.isdir(self.config_dir):
+                shutil.rmtree(self.config_dir)
+
+            os.remove(self.modified_compose_file.name)
+            raise e
+        
+        self._latest_screen = None
+        self._known_mouse = None
+        self.recent_events = []
+        self.link_hover = False
+
+    def navigate(self, url):
+        if BrowserEnvironment._ws_server:
+            websockets.broadcast(self.websockets, json.dumps({"type":"navigation", "url": url}))
+        elif BrowserEnvironment._nm_server:
+            BrowserEnvironment._nm_server.sendMessage({"ip": self.ip_address, "type":"navigation", "url": url})
+            
+    def _connect_vnc(self):
+        self.vnc_client = api.connect(f"{self.ip_address}::5901", password="12345", timeout=1)
+        while not self._known_mouse:
+            try:
+                self.vnc_client.mouseMove(2, self.TOOLBAR_MARGIN+2)
+                self._known_mouse = (2, self.TOOLBAR_MARGIN+2)
+            except:
+                self.vnc_client = api.connect(f"{self.ip_address}::5901", password="12345", timeout=1)
+                pass
+                    
+    def _set_screen(self, v):
+        self._latest_screen = v
+
+    def receive(self, msg):
+
+        self.last_seen = time.time()
+        self.last_msg = msg
+        if msg["type"] == "mouseup":
+            with self._mouseUpCondition:
+                self._mouseUpCondition.notify()
+            return
+        elif msg["type"] == "mousedown":
+            with self._mouseDownCondition:
+                self._mouseDownCondition.notify()
+            return
+        elif msg["type"] == "navigate":
+            with self._navigateCondition:
+                self._navigateCondition.notify()
+        elif msg["type"] == "linkhover":
+            self.link_hover = True
+        elif msg["type"] == "mousemove":
+            with self._mouseMoveCondition:
+                self._mouseMoveCondition.notify()
+            self.link_suggestion = msg["suggestion"]
+            return
+        elif msg["type"] == "connection":
+            with self._connectionCondition:
+                self._connectionCondition.notify()
+            return
+        elif msg["type"] == "navigation":
+            cururl = msg["url"]
+            if "https://assets.standardrl.com" in cururl:
+                cururl = "<Internal URL>"
+            else:   
+                BrowserEnvironment.visited_links.add(cururl)
+            #if self.current_url == cururl:
+            #    # Doesn't count if it's not a new page
+            #    return
+            self.current_url = cururl
+        elif msg["type"] == "links":
+            for k in msg["value"]:
+                domain = urlparse(k).netloc
+                if domain not in BrowserEnvironment.seen_links.keys():
+                    if not k.startswith("about"):
+                        BrowserEnvironment.seen_links[domain] = [k]
+                else:
+                    if not k.startswith("about"):
+                        BrowserEnvironment.seen_links[domain].append(k)
+            return
+        elif msg["type"] == "click":
+            self.last_element = {"text": msg["text"], "rect": msg["bounding_rect"]}
+        elif msg["type"] == "highlight":
+            self.last_highlight = " ".join(msg["value"])
+        elif msg["type"] == "scroll":
+            self.last_scroll = {"x": msg['value_x'], "y": msg['value_y']}
+
+        self.recent_events.append(msg)
+
+    def clearEvents(self):
+        self.recent_events = []
+
+    def awaitMouseUp(self):
+        with self._mouseUpCondition:
+            if self._mouseUpCondition.wait(timeout=2):
+                return
+            else:
+                return
+
+    def awaitMouseDown(self):
+        with self._mouseDownCondition:
+            if self._mouseDownCondition.wait(timeout=2):
+                return
+            else:
+                return
+            
+    def awaitMouseMove(self):
+        with self._mouseMoveCondition:
+            if self._mouseMoveCondition.wait(timeout=2):
+                return
+            else:
+                return
+
+    def awaitNavigate(self):
+        with self._navigateCondition:
+            if self._navigateCondition.wait(timeout=2):
+                return
+            else:
+                return
+
+    def awaitConnection(self):
+        with self._connectionCondition:
+            if self._connectionCondition.wait(timeout=2):
+                return
+            else:
+                return
+
+    def getBlankScreen(self, mode="rgb_array"):
+        return np.zeros((self.height, self.width, 3), dtype=np.int8)
+
+    def getScreen(self, mode="rgb_array"):
+        """Capture and return a screenshot from the VNC connection."""
+        if not self.vnc_client:
+            self._connect_vnc()
+
+        try:
+            self.vnc_client.captureRegionPIL(self._set_screen, 0, self.TOOLBAR_MARGIN, self.width, self.height)
+
+            if mode == "pil":
+                return self._latest_screen
+            elif mode == "rgb_array":
+                image = self._latest_screen.convert('RGB')
+                rgba_array = np.array(image, dtype=np.uint8)
+                return rgba_array
+            else:
+                return None
+        except Exception as e:
+            self.vnc_client = None
+            return np.zeros((self.height, self.width, 3), dtype=np.int8)
+    
+    def nudgeMouse(self, dx, dy):
+        if not self.vnc_client:
+            self._connect_vnc()
+        try:
+            x, y = self._known_mouse
+            newmouse = (int(min(max(0, x+dx), self.width-1)), int(min(max(0, y-self.TOOLBAR_MARGIN+dy), self.height-1)+self.TOOLBAR_MARGIN))
+            self.vnc_client.mouseMove(*newmouse)
+            self._known_mouse = newmouse
+            return True
+        except Exception as e:
+            self.vnc_client = None
+            return False
+
+    def setMouse(self, x, y):
+        """Set the mouse position on the VNC connection."""
+        if not self.vnc_client:
+            self._connect_vnc()
+        try:
+            newmouse = (int(min(max(0, x), self.width-1)), int(min(max(0, y), self.height-1)+self.TOOLBAR_MARGIN))
+            self.vnc_client.mouseMove(*newmouse)
+            self._known_mouse = newmouse
+            return True
+        except Exception as e:
+            self.vnc_client = None
+            return False
+
+    def click(self, button=1):
+        """Click the mouse button on the VNC connection."""
+        if not self.vnc_client:
+            self._connect_vnc()
+        try:
+            self.vnc_client.mousePress(button)
+            return True
+        except Exception as e:
+            self.vnc_client = None
+            return False
+    
+    def mouseHoldStart(self, button=1):
+        """Press the mouse button on the VNC connection."""
+        if not self.vnc_client:
+            self._connect_vnc()
+        try:
+            self.vnc_client.mouseDown(button)
+            self.isMouseDown = True
+            return True
+        except Exception as e:
+            self.vnc_client = None
+            return False
+
+    def mouseHoldEnd(self, button=1):
+        """Release the mouse button on the VNC connection."""
+        if not self.vnc_client:
+            self._connect_vnc()
+        try:
+            self.vnc_client.mouseUp(button)
+            self.isMouseDown = False
+            return True
+        except Exception as e:
+            self.vnc_client = None
+            return False
+        
+    def keyDown(self, key):
+        """Release the mouse button on the VNC connection."""
+        if not self.vnc_client:
+            self._connect_vnc()
+        try:
+            self.vnc_client.keyDown(key)
+            return True
+        except Exception as e:
+            self.vnc_client = None
+            return False
+        
+    def keyUp(self, key):
+        """Release the mouse button on the VNC connection."""
+        if not self.vnc_client:
+            self._connect_vnc()
+        try:
+            self.vnc_client.keyUp(key)
+            return True
+        except Exception as e:
+            self.vnc_client = None
+            return False
+        
+    def keyPress(self, key):
+        """Release the mouse button on the VNC connection."""
+        if not self.vnc_client:
+            self._connect_vnc()
+        try:
+            self.vnc_client.keyPress(key)
+            return True
+        except Exception as e:
+            self.vnc_client = None
+            return False
+        
+        
+    def close(self):
+        """Stop and remove the container, return the IP address to the pool, delete the temp directory, and close VNC."""
+        try:
+            subprocess.run(
+                ["docker-compose", "-f", self.modified_compose_file.name, "down"],
+                check=True,
+                env=dict(os.environ, COMPOSE_PROJECT_NAME=self.project_name)
+            )
+        except subprocess.CalledProcessError as e:
+            print(f"Error stopping container: {e}")
+
+        # Close the VNC connection if it's open
+        if self.vnc_client:
+            self.vnc_client.disconnect()
+
+        # Release the IP back to the pool and clean up resources
+        with BrowserEnvironment._lock:
+            BrowserEnvironment._available_ips.append(self.ip_address)
+            
+        # Remove the instance from the class-level dictionary
+        BrowserEnvironment._instances.pop(self.ip_address, None)
+
+        if self.config_dir and os.path.isdir(self.config_dir):
+            shutil.rmtree(self.config_dir)
+            
+        # Remove the modified compose file if it exists
+        try:
+            if os.path.exists(self.modified_compose_file.name):
+                os.remove(self.modified_compose_file.name)
+        except PermissionError as e:
+            print(f"Permission error when trying to delete file {self.modified_compose_file.name}: {e}")
+
+    def __del__(self):
+        """Ensure the container is closed, IP returned, and VNC disconnected on object deletion."""
+        self.close()
 
 
 class BrowserGymEnv(gym.Env):
@@ -420,19 +820,266 @@ class BrowserGymEnv(gym.Env):
     metadata = {'render_modes': ['rgb_array']}
     _all_time_seen = {}
 
-    def __init__(self, maxsteps=5000, actionmode='relative', reset_from_seen=False,
-                 width=500, height=500, statemode='full', statewidth=100,
-                 stateheight=100, subnet=20, runtime_args=None, cautious_mode=False):
+   def __init__(self, maxsteps=5000, actionmode='relative', reset_from_seen=False, width=500, height=500, statemode='full', statewidth=100, stateheight=100, subnet=20, runtime_args=None, cautious_mode=False):
+        super(BrowserGymEnv, self).__init__()
+        
+        self.cautious_mode = cautious_mode
+        self.reset_from_seen = reset_from_seen
+
+        if not runtime_args:
+            runtime_args = {}
+
+        # Initialize the ParticleSimulation with given parameters
+        self.browser = BrowserEnvironment(height=height, width=width, subnet=subnet, **runtime_args)
+        
+        self.maxsteps = maxsteps
+
+        self.statewidth = statewidth
+        self.stateheight = stateheight
+
+        self.actionmode = actionmode
+        self.statemode = statemode
+
+        self.rewarded_urls = set()
+        self._all_time_seen_domains = set()
+
+        self.last_url = None
+
+        # Define the action space: (hit, x, y)
+        if self.actionmode == "relative":
+            self.action_space = spaces.Discrete(9)
+        elif self.actionmode == "absolute":
+            self.action_space = spaces.Tuple((
+                spaces.Discrete(width), 
+                spaces.Discrete(height)
+            ))
+        else:
+            raise Exception("Unknown action type, use 'relative' or 'absolute'")
+
+        if self.statemode == "full":
+            self.observation_space = spaces.Box(low=0, high=255, shape=(width, height, 3), dtype=np.uint8)
+        elif self.statemode == "zoomed":
+            self.observation_space = spaces.Box(low=0, high=255, shape=(self.statewidth, self.stateheight, 3), dtype=np.uint8)
+        elif self.statemode == "both":
+            print("WARNING: Using 'both' mode means that observation_space will not be set")
+        else:
+            raise Exception("Unknown state type, use 'full' or 'zoomed'")
+
+        
+        # Rendering options
+        self.render_mode = None
+        self.width = width
+        self.height = height
+
+        self.reset()
+
+    def convert_to_state(self, data, x, y):
+        height, width, channels = data.shape
+
+        # Define cropping bounds
+        left = x - self.statewidth // 2
+        right = x + self.statewidth // 2
+        top = y - self.stateheight // 2
+        bottom = y + self.stateheight // 2
+
+        # Create a blank image for the output
+        cropped_image = np.zeros((self.stateheight, self.statewidth, channels), dtype=data.dtype)
+
+        # Calculate the region to copy from the original image
+        src_x1 = max(0, left)
+        src_x2 = min(width, right)
+        src_y1 = max(0, top)
+        src_y2 = min(height, bottom)
+
+        # Calculate the corresponding region in the output image
+        dst_x1 = max(0, -left)
+        dst_x2 = self.statewidth - max(0, right - width)
+        dst_y1 = max(0, -top)
+        dst_y2 = self.stateheight - max(0, bottom - height)
+
+        # Copy the valid region from the original image to the output image
+        cropped_image[dst_y1:dst_y2, dst_x1:dst_x2] = data[src_y1:src_y2, src_x1:src_x2]
+
+        return cropped_image
+    
+    def _getState(self):
+
+        if self.statemode == "zoomed":
+            state = self.convert_to_state(self.browser.getScreen(), self.browser._known_mouse[0], self.browser._known_mouse[1]-self.browser.TOOLBAR_MARGIN)
+        elif self.statemode == "full":
+            state = self.browser.getScreen()
+        elif self.statemode == "both":
+            state = self.browser.getScreen(), self.convert_to_state(self.browser.getScreen(), self.browser._known_mouse[0], self.browser._known_mouse[1]-self.browser.TOOLBAR_MARGIN)
+
+        return state
+
+    def reset(self, seed=None, options=None):
         """
-        Configure Gym spaces, instantiate BrowserEnvironment, and reset state.
-
-        actionmode: 'relative' for discrete moves + click, or 'absolute' for pixel targeting.
-        statemode: 'full', 'zoomed', or 'both' determines observation shape.
+        Reset the simulation to start over.
         """
-        super().__init__()
-        # ... initialization logic unchanged ...
-        pass  # placeholder
+        # Seeding
+        super().reset(seed=seed)
+        
+        self.stepcount = 0
 
-    # Conversion, reset, step, render methods follow with published-level docstrings
+        if time.time()-self.browser.last_seen > 10:
+            # Force restart the browser if we are stuck
+            print("")
+            print(f"Time since last seen too high: {time.time()-self.browser.last_seen}s ago")
+            print(self.browser.last_msg)
+            print("")
+            self.browser.keyDown("ctrl")
+            self.browser.keyPress("w")
+            self.browser.keyUp("ctrl")
+            self.browser.awaitConnection()
 
-# End of env_cleaned.py
+        self.rewarded_urls = set()
+
+        self.last_url = None
+
+        if self.reset_from_seen:
+            if len(BrowserEnvironment.seen_links.keys()) > 0:
+                rdomain = random.choice(list(BrowserEnvironment.seen_links.keys()))
+                start_url = random.choice(BrowserEnvironment.seen_links[rdomain])
+                self.browser.navigate(start_url)
+                print("Starting at ",start_url)
+                self.browser.awaitNavigate()
+        else:
+            if len(self._all_time_seen.keys()) > 0:
+                rdomain = random.choice(list(self._all_time_seen.keys()))
+                start_url = random.choice(self._all_time_seen[rdomain])
+                self.browser.navigate(start_url)
+                print("Starting at ",start_url)
+                self.browser.awaitNavigate()
+
+        self.browser.setMouse(random.randrange(0, self.browser.height), random.randrange(0, self.browser.width))
+
+        return self._getState(), {}
+
+    def step(self, action):
+        """
+        Execute the given action in the simulation environment.
+        """
+
+        if self.stepcount > self.maxsteps:
+            return
+
+        self.stepcount += 1
+
+        if self.actionmode == "absolute":
+            x, y = action
+            self.browser.clearEvents()
+            self.browser.setMouse(x, y)
+            self.browser.click()
+            self.browser.awaitMouseUp()
+
+        elif self.actionmode == "relative":
+            delta = 20
+            proceed = False
+            if action == 0:
+                self.browser.nudgeMouse(delta, 0)
+            elif action == 1:
+                self.browser.nudgeMouse(delta/2, delta/2)
+            elif action == 2:
+                self.browser.nudgeMouse(0, delta)
+            elif action == 3:
+                self.browser.nudgeMouse(-delta/2, delta/2)
+            elif action == 4:
+                self.browser.nudgeMouse(-delta, 0)
+            elif action == 5:
+                self.browser.nudgeMouse(-delta/2, -delta/2)
+            elif action == 6:
+                self.browser.nudgeMouse(0, -delta)
+            elif action == 7:
+                self.browser.nudgeMouse(delta/2, -delta/2)
+            elif action == 8:
+                self.browser.click()
+                self.browser.awaitMouseUp()
+                proceed = True
+            elif action == 9:
+                if self.browser.isMouseDown:
+                    self.browser.mouseHoldEnd()
+                    self.browser.awaitMouseUp()
+                else:
+                    self.browser.mouseHoldStart()
+                    self.browser.awaitMouseDown()
+                proceed = True
+
+            if self.cautious_mode and not proceed:
+                self.browser.awaitMouseMove()
+            
+        lastel = self.browser.last_element
+        self.browser.last_element = None
+
+        lasthi = self.browser.last_highlight
+        self.browser.last_highlight = None
+
+        lastscr = self.browser.last_scroll
+        self.browser.last_scroll = None
+
+        linkhov = self.browser.link_hover
+        self.browser.link_hover = False
+
+        events = self.browser.recent_events
+        self.browser.clearEvents()
+        reward = 0
+
+        did_navigate = False
+        new_page = False
+
+        for e in events:
+            if e["type"] == "navigation":
+                if "https://assets.standardrl.com" not in e["url"]:
+                    did_navigate = True
+                    if e["url"] not in self.rewarded_urls:
+                        new_page = True
+
+                if e["url"] not in self.rewarded_urls and "https://assets.standardrl.com" not in e["url"]:
+                    domain = urlparse(e["url"]).netloc
+                    if domain not in self._all_time_seen_domains:
+                        reward = 2
+                        self._all_time_seen_domains.add(domain)
+                    else:
+                        reward = 1
+                    if self.stepcount == 1:
+                        reward = 0
+                    else:
+                        if reward == 2:
+                            print(f"New site ({domain}) seen by {self.browser.ip_address}")
+                        elif reward == 1:
+                            print(f"New page seen by {self.browser.ip_address}")
+
+                    self.rewarded_urls.add(e["url"])
+                    if self.last_url is not None:
+                        last_domain = urlparse(self.last_url).netloc
+                        if last_domain not in self._all_time_seen.keys():
+                            if not self.last_url.startswith("about"):
+                                self._all_time_seen[last_domain] = [self.last_url]
+                                print(f"Just been to {last_domain} for the first time")
+                                print(f"Now been to {len(self._all_time_seen.keys())} domains")
+                        else:
+                            if not self.last_url.startswith("about"):
+                                self._all_time_seen[last_domain].append(self.last_url)
+                    self.last_url = e["url"]
+                    break
+            elif e["type"] == "scroll":
+                if (e["value_x"] > 0 and e["value_y"] >= 0) or (e["value_y"] > 0 and e["value_x"] >= 0):
+                    reward = 1
+                    break
+            elif e["type"] == "highlight":
+                if len(e["value"]) > 1:
+                    reward = 1
+                    break
+
+        if self.stepcount > self.maxsteps:
+            print(f"{self.browser.ip_address} finished")
+            done = True
+        else:
+            done = False
+            
+        
+        return self._getState(), reward, done, False, {"current_url": self.browser.current_url, "did_navigate": did_navigate, "new_page": new_page, "last_element": lastel, "last_highlight": lasthi, "last_scroll": lastscr, "mouse_held": self.browser.isMouseDown, "link_hover": linkhov}
+
+            
+    def render(self):
+        return self.browser.getScreen()
